@@ -1,0 +1,134 @@
+<?php
+// Configuração, banco de dados (SQLite) e funções compartilhadas.
+date_default_timezone_set('America/Sao_Paulo');
+
+const ABERTURA   = 9 * 60;   // 09:00 em minutos desde a meia-noite
+const FECHAMENTO = 18 * 60;  // 18:00
+const PASSO      = 10;       // intervalo entre horários oferecidos (min)
+
+function db(): PDO {
+    static $pdo = null;
+    if ($pdo) return $pdo;
+    $pdo = new PDO('sqlite:' . __DIR__ . '/barbearia.db');
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->exec("CREATE TABLE IF NOT EXISTS servicos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        duracao INTEGER NOT NULL,
+        preco REAL NOT NULL)");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS agendamentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        servico_id INTEGER NOT NULL REFERENCES servicos(id),
+        cliente TEXT NOT NULL,
+        telefone TEXT NOT NULL,
+        data TEXT NOT NULL,       -- AAAA-MM-DD
+        inicio INTEGER NOT NULL,  -- minutos desde 00:00
+        fim INTEGER NOT NULL)");
+    if ((int)$pdo->query("SELECT COUNT(*) FROM servicos")->fetchColumn() === 0) {
+        $pdo->exec("INSERT INTO servicos (nome, duracao, preco) VALUES ('Corte', 40, 50.00), ('Barba', 20, 30.00)");
+    }
+    return $pdo;
+}
+
+function h($s): string { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+function hora(int $min): string { return sprintf('%02d:%02d', intdiv($min, 60), $min % 60); }
+function reais(float $v): string { return 'R$ ' . number_format($v, 2, ',', '.'); }
+function dataBR(string $iso): string { return date('d/m/Y', strtotime($iso)); }
+
+function dataValida(string $d): bool {
+    $dt = DateTime::createFromFormat('Y-m-d', $d);
+    return $dt && $dt->format('Y-m-d') === $d;
+}
+
+// Há conflito se o intervalo [inicio, fim) cruza com algum agendamento do dia.
+function haConflito(PDO $pdo, string $data, int $inicio, int $fim): bool {
+    $st = $pdo->prepare("SELECT COUNT(*) FROM agendamentos WHERE data = ? AND inicio < ? AND fim > ?");
+    $st->execute([$data, $fim, $inicio]);
+    return (int)$st->fetchColumn() > 0;
+}
+
+// Horários de início possíveis para um serviço de $duracao minutos em $data.
+function horariosLivres(PDO $pdo, string $data, int $duracao): array {
+    $livres = [];
+    $agora = ($data === date('Y-m-d')) ? (int)date('G') * 60 + (int)date('i') : -1;
+    for ($ini = ABERTURA; $ini + $duracao <= FECHAMENTO; $ini += PASSO) {
+        if ($ini <= $agora) continue;
+        if (!haConflito($pdo, $data, $ini, $ini + $duracao)) $livres[] = $ini;
+    }
+    return $livres;
+}
+
+function topo(string $titulo): void { ?>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title><?= h($titulo) ?> – Barbearia SC</title>
+<style>
+:root{--azul:#1f2a44;--vermelho:#b3261e;--papel:#f3f4f6;--linha:#d5d9e0;--texto:#1b1f2a;--ok:#1d6b3a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--papel);color:var(--texto);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+.poste{height:10px;background:repeating-linear-gradient(135deg,var(--vermelho) 0 14px,#fff 14px 28px,var(--azul) 28px 42px,#fff 42px 56px)}
+header{background:var(--azul);color:#fff}
+header .in{max-width:880px;margin:auto;padding:14px 20px;display:flex;flex-wrap:wrap;gap:12px 28px;align-items:center;justify-content:space-between}
+header strong{font:700 22px Georgia,serif;letter-spacing:.3px}
+nav a{color:#fff;text-decoration:none;margin-right:18px;padding:4px 0;border-bottom:2px solid transparent}
+nav a:hover,nav a:focus-visible{border-color:var(--vermelho)}
+main{max-width:880px;margin:auto;padding:24px 20px 60px}
+h1{font:700 28px Georgia,serif;margin:8px 0 4px}
+h2{font:700 20px Georgia,serif;margin:0 0 12px}
+p.sub{margin:0 0 20px;color:#555}
+section{background:#fff;border:1px solid var(--linha);border-radius:6px;padding:20px;margin-bottom:20px}
+label{display:block;font-weight:600;margin:12px 0 4px}
+input,select{width:100%;max-width:420px;padding:9px 10px;border:1px solid #aab1bd;border-radius:4px;font:inherit;background:#fff}
+input:focus-visible,select:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #6b8cff;outline-offset:2px}
+.linha{display:flex;flex-wrap:wrap;gap:0 16px}
+.linha>div{flex:1 1 140px}
+button,.btn{display:inline-block;margin-top:16px;padding:10px 18px;border:0;border-radius:4px;background:var(--azul);color:#fff;font:600 15px inherit;cursor:pointer;text-decoration:none}
+button:hover,.btn:hover{background:#2c3a5e}
+button.perigo{background:#fff;color:var(--vermelho);border:1px solid var(--vermelho);margin:0;padding:5px 10px;font-size:14px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--linha)}
+th{font-size:14px;color:#555}
+.aviso{padding:10px 14px;border-radius:4px;margin-bottom:16px}
+.aviso.ok{background:#e4f3ea;color:var(--ok);border:1px solid #b5dcc2}
+.aviso.erro{background:#fbe7e5;color:var(--vermelho);border:1px solid #efb9b4}
+.vazio{color:#666;margin:0}
+.horarios{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.horarios input{position:absolute;opacity:0;width:1px;height:1px}
+.horarios span{display:inline-block;padding:8px 14px;border:1px solid #aab1bd;border-radius:4px;background:#fff;cursor:pointer;font-variant-numeric:tabular-nums}
+.horarios input:checked+span{background:var(--azul);color:#fff;border-color:var(--azul)}
+.horarios input:focus-visible+span{outline:3px solid #6b8cff;outline-offset:2px}
+.aviso.info{background:#fff4d6;color:#6b4e00;border:1px solid #ecd28a;font-weight:600}
+.cards{display:grid;gap:16px}
+.card{background:#fff;border:1px solid var(--linha);border-left:6px solid var(--vermelho);border-radius:6px;padding:18px 20px}
+.card .topo{display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline;justify-content:space-between}
+.card h2{margin:0}
+.card .preco{font:700 22px Georgia,serif;color:var(--azul)}
+.card .meta{color:#555;margin:2px 0 10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}
+.chips a{padding:5px 10px;border:1px solid #aab1bd;border-radius:4px;background:#fff;color:var(--texto);text-decoration:none;font-variant-numeric:tabular-nums;font-size:14px}
+.chips a:hover{background:var(--azul);color:#fff;border-color:var(--azul)}
+.resumo{border-left:6px solid var(--vermelho)}
+.resumo dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}
+.resumo dt{color:#555}.resumo dd{margin:0;font-weight:600}
+a.btn.sec{background:#fff;color:var(--azul);border:1px solid var(--azul)}
+td.hr{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+@media(max-width:600px){.tabela-wrap{overflow-x:auto}}
+</style>
+</head>
+<body>
+<div class="poste"></div>
+<header><div class="in">
+  <strong>Barbearia SC</strong>
+  <nav aria-label="Principal">
+    <a href="home.php">Início</a>
+    <a href="Visualizar_Agenda.php">Agenda do dia</a>
+    <a href="Servicos.php">Cadastro de serviços</a>
+  </nav>
+</div></header>
+<main>
+<?php }
+
+function rodape(): void { echo "</main>\n</body>\n</html>"; }
